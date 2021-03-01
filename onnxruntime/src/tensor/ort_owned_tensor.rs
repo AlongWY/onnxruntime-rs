@@ -70,6 +70,11 @@ where
         }
     }
 
+    /// Test ONNX data is empty.
+    pub fn is_valid(&self) -> bool {
+        *self.shape.index(0) != 0
+    }
+
     /// The ONNX data type this tensor contains.
     pub fn data_type(&self) -> TensorElementDataType {
         self.data_type
