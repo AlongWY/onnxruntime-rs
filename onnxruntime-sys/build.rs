@@ -5,6 +5,7 @@ use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
 };
+use walkdir::WalkDir;
 
 /// ONNX Runtime version
 ///
@@ -67,7 +68,15 @@ fn generate_bindings(_include_dir: &Path) {
 #[cfg(feature = "generate-bindings")]
 fn generate_bindings(include_dir: &Path) {
     let os = env::var("CARGO_CFG_TARGET_OS").expect("Unable to get TARGET_OS");
-    let clang_arg = format!("-I{}", include_dir.display());
+    let mut clang_include_args = vec![];
+
+    for entry in WalkDir::new(include_dir) {
+        let entry = entry.unwrap();
+        if entry.path().is_dir() {
+            clang_include_args.push(format!("-I{}", entry.path().display()));
+        }
+    }
+
     let clang_cuda_arg = match env::var(ORT_ENV_GPU) {
         Ok(cuda_env) => match cuda_env.to_lowercase().as_str() {
             "1" | "yes" | "true" | "on" => match os.as_str() {
@@ -90,10 +99,10 @@ fn generate_bindings(include_dir: &Path) {
         // The input header we would like to generate
         // bindings for.
         .header("wrapper.h")
-        // The current working directory is 'onnxruntime-sys'
-        .clang_arg(clang_arg)
         // Add define ORT_USE_CUDA
         .clang_arg(clang_cuda_arg)
+        // The current working directory is 'onnxruntime-sys'
+        .clang_args(clang_include_args)
         // Tell cargo to invalidate the built crate whenever any of the
         // included header files changed.
         .parse_callbacks(Box::new(bindgen::CargoCallbacks))
