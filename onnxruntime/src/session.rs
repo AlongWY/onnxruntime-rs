@@ -121,6 +121,7 @@ impl<'a> SessionBuilder<'a> {
     }
 
     /// Set the session use cpu provider
+    #[cfg(feature = "generate-bindings")] // todo: remove after regenerate the bindings
     pub fn with_cpu(self, use_arena: bool) -> Result<SessionBuilder<'a>> {
         unsafe {
             sys::OrtSessionOptionsAppendExecutionProvider_CPU(
@@ -414,6 +415,118 @@ impl<'a> Session<'a> {
             .iter()
             .map(|output| output.name.clone())
             .collect();
+        let output_names_cstring: Vec<CString> = output_names
+            .into_iter()
+            .map(|n| CString::new(n).unwrap())
+            .collect();
+        let output_names_ptr: Vec<*const i8> = output_names_cstring
+            .iter()
+            .map(|n| n.as_ptr() as *const i8)
+            .collect();
+
+        let mut output_tensor_ptrs: Vec<*mut sys::OrtValue> =
+            vec![std::ptr::null_mut(); self.outputs.len()];
+
+        // The C API expects pointers for the arrays (pointers to C-arrays)
+        let input_ort_tensors: Vec<OrtTensor<TIn, D>> = input_arrays
+            .into_iter()
+            .map(|input_array| {
+                OrtTensor::from_array(&self.memory_info, self.allocator_ptr, input_array)
+            })
+            .collect::<Result<Vec<OrtTensor<TIn, D>>>>()?;
+        let input_ort_values: Vec<*const sys::OrtValue> = input_ort_tensors
+            .iter()
+            .map(|input_array_ort| input_array_ort.c_ptr as *const sys::OrtValue)
+            .collect();
+
+        let run_options_ptr: *const sys::OrtRunOptions = std::ptr::null();
+
+        let status = unsafe {
+            g_ort().Run.unwrap()(
+                self.session_ptr,
+                run_options_ptr,
+                input_names_ptr.as_ptr(),
+                input_ort_values.as_ptr(),
+                input_ort_values.len() as u64, // C API expects a u64, not isize
+                output_names_ptr.as_ptr(),
+                output_names_ptr.len() as u64, // C API expects a u64, not isize
+                output_tensor_ptrs.as_mut_ptr(),
+            )
+        };
+        status_to_result(status).map_err(OrtError::Run)?;
+
+        let memory_info_ref = &self.memory_info;
+        let outputs: Result<Vec<DynOrtTensor<ndarray::Dim<ndarray::IxDynImpl>>>> =
+            output_tensor_ptrs
+                .into_iter()
+                .map(|tensor_ptr| {
+                    let (dims, data_type) = unsafe {
+                        call_with_tensor_info(tensor_ptr, |tensor_info_ptr| {
+                            get_tensor_dimensions(tensor_info_ptr)
+                                .map(|dims| dims.iter().map(|&n| n as usize).collect::<Vec<_>>())
+                                .and_then(|dims| {
+                                    extract_data_type(tensor_info_ptr)
+                                        .map(|data_type| (dims, data_type))
+                                })
+                        })
+                    }?;
+
+                    Ok(DynOrtTensor::new(
+                        tensor_ptr,
+                        memory_info_ref,
+                        ndarray::IxDyn(&dims),
+                        data_type,
+                    ))
+                })
+                .collect();
+
+        // Reconvert to CString so drop impl is called and memory is freed
+        let _: Vec<CString> = input_names_ptr
+            .into_iter()
+            .map(|p| {
+                assert_ne!(p, std::ptr::null());
+                unsafe { CString::from_raw(p as *mut i8) }
+            })
+            .collect();
+
+        outputs
+    }
+
+    /// Run the input data through the ONNX graph, performing inference.
+    ///
+    /// Note that ONNX models can have multiple inputs; a `Vec<_>` is thus
+    /// used for the input data here.
+    pub fn run_with_options<'s, 't, 'm, TIn, D>(
+        &'s mut self,
+        input_arrays: Vec<Array<TIn, D>>,
+        output_names: &Vec<Output>,
+    ) -> Result<Vec<DynOrtTensor<'m, ndarray::IxDyn>>>
+    where
+        TIn: TypeToTensorElementDataType + Debug + Clone,
+        D: ndarray::Dimension,
+        'm: 't, // 'm outlives 't (memory info outlives tensor)
+        's: 'm, // 's outlives 'm (session outlives memory info)
+    {
+        self.validate_input_shapes(&input_arrays)?;
+
+        // Build arguments to Run()
+
+        let input_names: Vec<String> = self.inputs.iter().map(|input| input.name.clone()).collect();
+        let input_names_cstring: Vec<CString> = input_names
+            .iter()
+            .cloned()
+            .map(|n| CString::new(n).unwrap())
+            .collect();
+        let input_names_ptr: Vec<*const i8> = input_names_cstring
+            .into_iter()
+            .map(|n| n.into_raw() as *const i8)
+            .collect();
+
+        let output_names: Vec<String> = output_names
+            .iter()
+            .map(|output| output.name.clone())
+            .collect();
+
         let output_names_cstring: Vec<CString> = output_names
             .into_iter()
             .map(|n| CString::new(n).unwrap())
